@@ -55,7 +55,7 @@ try:
         FOLDER_DB_ID = st.secrets["drive"]["pasta_id"]
         USE_GDRIVE = True
 except Exception as e:
-    pass # Falha silenciosa, usa modo local
+    pass # Falha silenciosa na configuração, usa modo local
 
 def sync_db_from_drive():
     """Baixa o banco de dados do Drive para o servidor local ao iniciar."""
@@ -74,7 +74,7 @@ def sync_db_from_drive():
             while done is False:
                 status, done = downloader.next_chunk()
     except Exception as e:
-        st.sidebar.warning("Aviso: Falha ao baixar banco da nuvem.")
+        st.sidebar.warning(f"Aviso: Falha ao baixar banco da nuvem. Detalhe: {e}")
 
 def backup_db_to_drive():
     """Faz o upload do banco de dados local para o Drive, sobrescrevendo o antigo."""
@@ -93,7 +93,7 @@ def backup_db_to_drive():
             file_metadata = {'name': 'mov_inclua_v4.db', 'parents': [FOLDER_DB_ID]}
             drive_service.files().create(body=file_metadata, media_body=media).execute()
     except Exception as e:
-        st.sidebar.error("Erro ao salvar backup na nuvem!")
+        st.sidebar.error(f"Erro ao salvar backup na nuvem! Detalhe: {e}")
 
 # Roda a sincronização inicial ao abrir o app
 if not os.path.exists('mov_inclua_v4.db') and USE_GDRIVE:
