@@ -4,6 +4,8 @@ import os
 import time
 import ast
 import unicodedata
+import requests
+import base64
 from datetime import datetime
 from fpdf import FPDF
 from PIL import Image
@@ -13,6 +15,9 @@ os.makedirs("fotos", exist_ok=True)
 os.makedirs("documentos", exist_ok=True)
 
 st.set_page_config(page_title="MOV INCLUA", layout="wide", initial_sidebar_state="expanded")
+
+# --- CHAVE DA API IMGBB ---
+IMGBB_API_KEY = "6c3c7d7468bd08f226d25d7ccf956560"
 
 # --- ESTILO CLEAN ---
 st.markdown("""
@@ -33,76 +38,10 @@ st.markdown("""
 
 ARQUIVO_LOGO = "inclusao preto.jpeg"
 
-# ==========================================
-# MOTOR DE SINCRONIZAÇÃO EM NUVEM (GOOGLE DRIVE)
-# ==========================================
-USE_GDRIVE = False
-drive_service = None
-FOLDER_DB_ID = ""
-
-try:
-    if "gcp_service_account" in st.secrets and "drive" in st.secrets:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-        from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
-        import io
-
-        creds_dict = dict(st.secrets["gcp_service_account"])
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict, scopes=['https://www.googleapis.com/auth/drive']
-        )
-        drive_service = build('drive', 'v3', credentials=creds)
-        FOLDER_DB_ID = st.secrets["drive"]["pasta_id"]
-        USE_GDRIVE = True
-except Exception as e:
-    pass # Falha silenciosa na configuração, usa modo local
-
-def sync_db_from_drive():
-    """Baixa o banco de dados do Drive para o servidor local ao iniciar."""
-    if not USE_GDRIVE: return
-    try:
-        query = f"name='mov_inclua_v4.db' and '{FOLDER_DB_ID}' in parents and trashed=false"
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        items = results.get('files', [])
-        
-        if items:
-            file_id = items[0]['id']
-            request = drive_service.files().get_media(fileId=file_id)
-            fh = io.FileIO('mov_inclua_v4.db', 'wb')
-            downloader = MediaIoBaseDownload(fh, request)
-            done = False
-            while done is False:
-                status, done = downloader.next_chunk()
-    except Exception as e:
-        st.sidebar.warning(f"Aviso: Falha ao baixar banco da nuvem. Detalhe: {e}")
-
-def backup_db_to_drive():
-    """Faz o upload do banco de dados local para o Drive, sobrescrevendo o antigo."""
-    if not USE_GDRIVE: return
-    try:
-        query = f"name='mov_inclua_v4.db' and '{FOLDER_DB_ID}' in parents and trashed=false"
-        results = drive_service.files().list(q=query, fields="files(id)").execute()
-        items = results.get('files', [])
-        
-        media = MediaFileUpload('mov_inclua_v4.db', mimetype='application/x-sqlite3', resumable=True)
-        
-        if items:
-            file_id = items[0]['id']
-            drive_service.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            file_metadata = {'name': 'mov_inclua_v4.db', 'parents': [FOLDER_DB_ID]}
-            drive_service.files().create(body=file_metadata, media_body=media).execute()
-    except Exception as e:
-        st.sidebar.error(f"Erro ao salvar backup na nuvem! Detalhe: {e}")
-
-# Roda a sincronização inicial ao abrir o app
-if not os.path.exists('mov_inclua_v4.db') and USE_GDRIVE:
-    sync_db_from_drive()
-
 # --- FUNÇÕES DE APOIO ---
 def get_db():
     conn = sqlite3.connect('mov_inclua_v4.db')
-    conn.row_factory = sqlite3.Row 
+    conn.row_factory = sqlite3.Row
     return conn
 
 def safe_str(valor):
@@ -131,6 +70,20 @@ def get_valid_defaults(saved_val, options):
                     valid.append(opt)
                     break
     return list(set(valid))
+
+# --- UPLOAD PARA O IMGBB ---
+def upload_foto_imgbb(foto_bytes):
+    url = "https://api.imgbb.com/1/upload"
+    payload = {
+        "key": IMGBB_API_KEY,
+        "image": base64.b64encode(foto_bytes).decode('utf-8')
+    }
+    response = requests.post(url, data=payload)
+    if response.status_code == 200:
+        # Retorna a URL direta da imagem salva na nuvem
+        return response.json()['data']['url']
+    else:
+        raise Exception(f"Erro ao conectar com ImgBB: {response.text}")
 
 # --- FUNÇÕES DE PDF ---
 def gerar_ficha_pdf(dados):
@@ -192,7 +145,6 @@ def gerar_historico_pdf(nome_crianca, historico):
 def gerar_pdf_culto(dados_culto):
     pdf = FPDF()
     pdf.add_page()
-    
     pdf.set_font("Arial", 'B', 16)
     pdf.cell(200, 10, txt="FICHA DE ACOMPANHAMENTO DE CULTO", ln=True, align='C')
     pdf.line(10, 20, 200, 20)
@@ -201,7 +153,6 @@ def gerar_pdf_culto(dados_culto):
     pdf.set_font("Arial", 'B', 12)
     pdf.cell(100, 8, txt=f"Crianca: {remover_acentos(dados_culto['nome'])}", ln=0)
     pdf.cell(100, 8, txt=f"Data: {dados_culto['data']}", ln=1)
-    
     pdf.cell(100, 8, txt=f"Periodo: {remover_acentos(dados_culto['periodo'])}", ln=0)
     pdf.cell(100, 8, txt=f"Unidade: {remover_acentos(dados_culto['unidade'])}", ln=1)
     
@@ -230,40 +181,72 @@ def gerar_pdf_culto(dados_culto):
     pdf.output(caminho_pdf)
     return caminho_pdf
 
+def gerar_pdf_relatorio_geral(registros, data_filtro, turno_filtro, unidade_filtro):
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(200, 10, txt="RELATORIO GERAL DE CULTOS", ln=True, align='C')
+    
+    pdf.set_font("Arial", '', 10)
+    txt_data = data_filtro if data_filtro else "Todas"
+    pdf.cell(200, 10, txt=f"Filtros -> Data: {txt_data} | Turno: {turno_filtro} | Unidade: {unidade_filtro}", ln=True, align='C')
+    
+    pdf.line(10, 30, 200, 30)
+    pdf.ln(10)
+    
+    if not registros:
+        pdf.cell(200, 10, txt="Nenhum registro encontrado.", ln=True)
+    else:
+        for r in registros:
+            pdf.set_font("Arial", 'B', 11)
+            pdf.cell(200, 8, txt=f"Crianca: {remover_acentos(r['nome'])}", ln=True)
+            pdf.set_font("Arial", '', 10)
+            pdf.cell(200, 6, txt=f"Data: {r['data']} | Turno: {remover_acentos(r['periodo'])} | Unidade: {remover_acentos(r['unidade'])}", ln=True)
+            pdf.cell(200, 6, txt=f"Coord: {remover_acentos(r['coordenador'])} | Voluntario: {remover_acentos(r['voluntario'])}", ln=True)
+            pdf.multi_cell(0, 6, txt=f"Relato: {remover_acentos(r['relato'])}")
+            pdf.ln(3)
+            pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+            pdf.ln(3)
+
+    caminho_pdf = f"documentos/relatorio_geral_{int(time.time())}.pdf"
+    pdf.output(caminho_pdf)
+    return caminho_pdf
+
 # --- INICIALIZAÇÃO DO BANCO DE DADOS ---
 def init_db():
     conn = get_db()
     conn.execute('''CREATE TABLE IF NOT EXISTS criancas (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    nome TEXT, nascimento TEXT, endereco TEXT, responsavel TEXT, tel_responsavel TEXT,
-                    mae TEXT, tel_mae TEXT, pai TEXT, tel_pai TEXT, foto TEXT, arquivo_laudo TEXT,
-                    rapida_diag TEXT, rapida_soc TEXT, rapida_soc_obs TEXT, rapida_com TEXT, rapida_com_obs TEXT,
-                    rapida_rest_sn TEXT, rapida_rest_qual TEXT, rapida_aler_sn TEXT, rapida_aler_qual TEXT,
-                    rapida_ativ TEXT, rapida_agita TEXT, rapida_acalma TEXT, rapida_adc TEXT,
-                    condicoes TEXT, nivel_suporte TEXT, diag_obs TEXT, possui_laudo TEXT,
-                    acomp_sn TEXT, acomp_qual TEXT, med_sn TEXT, med_qual TEXT, esc_sn TEXT, esc_qual TEXT,
-                    comunicacao TEXT, comu_ajuda TEXT,
-                    sens_sn TEXT, sens_quais TEXT, sens_expl TEXT, sens_estresse TEXT, sens_adapt TEXT, sens_pref TEXT,
-                    est_sn TEXT, est_obs TEXT, int_hab TEXT, int_brinq TEXT, int_criancas TEXT, int_suporte TEXT,
-                    auto_banh TEXT, auto_banh_obs TEXT, auto_alim TEXT, auto_alim_obs TEXT, aler_sn TEXT, aler_obs TEXT,
-                    comp_rotina TEXT, comp_estrategia TEXT, comp_ambientes TEXT, 
-                    comp_gat_sn TEXT, comp_gat_quais TEXT, comp_les_sn TEXT, comp_les_quais TEXT, comp_crise TEXT,
-                    info_adc TEXT)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        nome TEXT, nascimento TEXT, endereco TEXT, responsavel TEXT, tel_responsavel TEXT,
+        mae TEXT, tel_mae TEXT, pai TEXT, tel_pai TEXT, foto TEXT, arquivo_laudo TEXT,
+        rapida_diag TEXT, rapida_soc TEXT, rapida_soc_obs TEXT, rapida_com TEXT, rapida_com_obs TEXT,
+        rapida_rest_sn TEXT, rapida_rest_qual TEXT, rapida_aler_sn TEXT, rapida_aler_qual TEXT,
+        rapida_ativ TEXT, rapida_agita TEXT, rapida_acalma TEXT, rapida_adc TEXT,
+        condicoes TEXT, nivel_suporte TEXT, diag_obs TEXT, possui_laudo TEXT,
+        acomp_sn TEXT, acomp_qual TEXT, med_sn TEXT, med_qual TEXT, esc_sn TEXT, esc_qual TEXT,
+        comunicacao TEXT, comu_ajuda TEXT,
+        sens_sn TEXT, sens_quais TEXT, sens_expl TEXT, sens_estresse TEXT, sens_adapt TEXT, sens_pref TEXT,
+        est_sn TEXT, est_obs TEXT, int_hab TEXT, int_brinq TEXT, int_criancas TEXT, int_suporte TEXT,
+        auto_banh TEXT, auto_banh_obs TEXT, auto_alim TEXT, auto_alim_obs TEXT, aler_sn TEXT, aler_obs TEXT,
+        comp_rotina TEXT, comp_estrategia TEXT, comp_ambientes TEXT, 
+        comp_gat_sn TEXT, comp_gat_quais TEXT, comp_les_sn TEXT, comp_les_quais TEXT, comp_crise TEXT,
+        info_adc TEXT)''')
     
     conn.execute('''CREATE TABLE IF NOT EXISTS acompanhamentos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    crianca_id INTEGER, data TEXT, periodo TEXT, unidade TEXT, 
-                    coordenador TEXT, voluntario TEXT, relato TEXT, visitante TEXT,
-                    FOREIGN KEY(crianca_id) REFERENCES criancas(id))''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        crianca_id INTEGER, data TEXT, periodo TEXT, unidade TEXT, 
+        coordenador TEXT, voluntario TEXT, relato TEXT, visitante TEXT,
+        FOREIGN KEY(crianca_id) REFERENCES criancas(id))''')
     
     conn.execute('''CREATE TABLE IF NOT EXISTS supervisores (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, usuario TEXT UNIQUE, senha TEXT)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, usuario TEXT UNIQUE, senha TEXT)''')
+    
     conn.execute('''CREATE TABLE IF NOT EXISTS acessos (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT, supervisor TEXT, data_hora TEXT)''')
+        id INTEGER PRIMARY KEY AUTOINCREMENT, supervisor TEXT, data_hora TEXT)''')
     
     admin = conn.execute("SELECT * FROM supervisores WHERE usuario='admin'").fetchone()
     if not admin:
-        conn.execute("INSERT INTO supervisores (nome, usuario, senha) VALUES (?,?,?)", ("Administrador", "admin", "Inclua2026"))
+        conn.execute("INSERT INTO supervisores (nome, usuario, senha) VALUES (?,?,?)", ("Administrador","admin","Inclua2026"))
     
     conn.commit()
     conn.close()
@@ -279,21 +262,18 @@ if not st.session_state.autenticado:
     with col_l2:
         try:
             if os.path.exists(ARQUIVO_LOGO):
-                img = Image.open(ARQUIVO_LOGO)
-                st.image(img, width=250)
+                st.image(Image.open(ARQUIVO_LOGO), width=250)
         except Exception as e:
-            st.warning(f"Aviso: Logotipo '{ARQUIVO_LOGO}' não carregado. Verifique o arquivo.")
+            st.warning(f"Aviso: Logotipo '{ARQUIVO_LOGO}' não carregado.")
         
         st.title("🔐 MOV INCLUA - Acesso")
         
         conn = get_db()
         ultimo = conn.execute("SELECT supervisor, data_hora FROM acessos ORDER BY id DESC LIMIT 1").fetchone()
         conn.close()
+        
         if ultimo:
-            st.info(f"Último acesso ao sistema: **{ultimo['supervisor']}** em {ultimo['data_hora']}")
-
-        if USE_GDRIVE:
-            st.success("☁️ Sincronização em Nuvem Ativada")
+            st.info(f"Último acesso: **{ultimo['supervisor']}** em {ultimo['data_hora']}")
 
         usuario_login = st.text_input("Usuário")
         senha_login = st.text_input("Senha", type="password")
@@ -305,7 +285,6 @@ if not st.session_state.autenticado:
                 agora = datetime.now().strftime("%d/%m/%Y %H:%M")
                 conn.execute("INSERT INTO acessos (supervisor, data_hora) VALUES (?,?)", (user['nome'], agora))
                 conn.commit()
-                backup_db_to_drive() # Backup após salvar acesso
                 st.session_state.autenticado = True
                 st.session_state.usuario = user['nome']
                 st.rerun()
@@ -362,13 +341,13 @@ if menu == "📝 1. Cadastro Pessoal":
                 
             elif modo == "🗑️ Apagar Cadastro":
                 st.warning(f"Você está prestes a apagar o cadastro de **{selec_edit}**.")
-                st.error("⚠️ Atenção: Esta ação apagará as fichas e o histórico de cultos desta criança. Não pode ser desfeito.")
+                st.error("⚠️ Atenção: Esta ação apagará todo o histórico desta criança. Não pode ser desfeito.")
+                
                 if st.checkbox("Sim, tenho certeza que desejo apagar os dados"):
                     if st.button("🗑️ Apagar Cadastro Definitivamente"):
                         conn.execute("DELETE FROM acompanhamentos WHERE crianca_id=?", (v_id,))
                         conn.execute("DELETE FROM criancas WHERE id=?", (v_id,))
                         conn.commit()
-                        backup_db_to_drive() # BACKUP
                         st.success("Cadastro apagado com sucesso! Atualizando tela...")
                         time.sleep(1.5)
                         st.rerun()
@@ -383,11 +362,15 @@ if menu == "📝 1. Cadastro Pessoal":
             nasc = c2.text_input("Data de Nascimento (Ex: 10/05/2018)", value=v_nasc, max_chars=10)
             endereco = st.text_input("Endereço Completo", value=v_end)
             
-            if v_foto_antiga and os.path.exists(v_foto_antiga): 
-                st.image(v_foto_antiga, width=150)
+            # --- LEITURA INTELIGENTE DA FOTO (LINK DO IMGBB OU ARQUIVO LOCAL) ---
+            if v_foto_antiga:
+                if str(v_foto_antiga).startswith('http'):
+                    st.image(v_foto_antiga, width=150, caption="Foto na Nuvem")
+                elif os.path.exists(v_foto_antiga):
+                    st.image(v_foto_antiga, width=150, caption="Foto Local Antiga")
             
-            st.markdown("📷 **Foto da Criança**")
-            foto_up = st.file_uploader("Anexar arquivo de imagem do computador/celular", type=['png', 'jpg', 'jpeg'])
+            st.markdown("📷 **Nova Foto da Criança** (Substitui a atual e salva na Nuvem)")
+            foto_up = st.file_uploader("Anexar arquivo de imagem", type=['png', 'jpg', 'jpeg'])
             foto_cam = st.camera_input("Ou capturar foto na hora com a câmera")
             foto = foto_cam or foto_up
             
@@ -399,6 +382,7 @@ if menu == "📝 1. Cadastro Pessoal":
             m, tm = st.columns([2,1])
             mae = m.text_input("Nome da Mãe", value=v_mae)
             tel_mae = tm.text_input("Celular (Mãe)", value=v_tel_mae)
+            
             p, tp = st.columns([2,1])
             pai = p.text_input("Nome do Pai", value=v_pai)
             tel_pai = tp.text_input("Celular (Pai)", value=v_tel_pai)
@@ -406,26 +390,32 @@ if menu == "📝 1. Cadastro Pessoal":
             texto_botao = "💾 Salvar Novo Cadastro" if modo == "✨ Novo Cadastro" else "💾 Atualizar Cadastro"
             
             if st.form_submit_button(texto_botao):
-                if not nome: st.error("O nome é obrigatório.")
+                if not nome: 
+                    st.error("O nome é obrigatório.")
                 else:
                     f_path = v_foto_antiga
-                    if foto: 
-                        f_path = f"fotos/f_{int(time.time())}.jpg"
-                        with open(f_path, "wb") as f: f.write(foto.getbuffer())
+                    
+                    # --- EXECUTA O UPLOAD PARA O IMGBB SE HOUVER FOTO ---
+                    if foto:
+                        st.info("🔄 Enviando a foto para a nuvem. Por favor, aguarde...")
+                        try:
+                            f_path = upload_foto_imgbb(foto.getvalue())
+                        except Exception as e:
+                            st.error(f"⚠️ Erro ao salvar foto: {e}")
+                            st.stop()
                     
                     conn = get_db()
                     if modo == "✨ Novo Cadastro":
                         conn.execute('''INSERT INTO criancas (nome, nascimento, endereco, responsavel, tel_responsavel, mae, tel_mae, pai, tel_pai, foto) 
                                         VALUES (?,?,?,?,?,?,?,?,?,?)''', (nome, nasc, endereco, responsavel, tel_responsavel, mae, tel_mae, pai, tel_pai, f_path))
-                        st.success("Criança cadastrada com sucesso! Limpando os campos...")
+                        st.success("Criança cadastrada com sucesso!")
                     else:
                         conn.execute('''UPDATE criancas SET nome=?, nascimento=?, endereco=?, responsavel=?, tel_responsavel=?, 
-                                        mae=?, tel_mae=?, pai=?, tel_pai=?, foto=? WHERE id=?''',
+                                        mae=?, tel_mae=?, pai=?, tel_pai=?, foto=? WHERE id=?''', 
                                      (nome, nasc, endereco, responsavel, tel_responsavel, mae, tel_mae, pai, tel_pai, f_path, v_id))
-                        st.success("Cadastro atualizado! Limpando a tela...")
+                        st.success("Cadastro atualizado!")
                     
                     conn.commit()
-                    backup_db_to_drive() # BACKUP NUVEM
                     conn.close()
                     time.sleep(1.5)
                     st.rerun()
@@ -475,7 +465,6 @@ elif menu == "⚡ 2. Ficha de Acolhimento Rápido":
                             rapida_ativ=?, rapida_agita=?, rapida_acalma=?, rapida_adc=? WHERE id=?''',
                          (diag, soc, soc_obs, com, com_obs, rest, rest_qual, aler, aler_qual, ativ, agita, acalma, adc, id_crianca))
             conn.commit()
-            backup_db_to_drive() # BACKUP NUVEM
             st.success("Ficha Rápida atualizada! Atualizando página...")
             time.sleep(1.5)
             st.rerun()
@@ -499,18 +488,10 @@ elif menu == "🧠 3. Ficha de Acolhimento Completa":
 
     with st.form("form_anamnese"):
         st.markdown("### I - Sobre a Necessidade Especifica/Diagnóstico:")
-        cond_ops = [
-            "TEA - Transtorno Espectro Autista", 
-            "TDAH - Transtorno de Deficit de Atenção, Hiperatividade", 
-            "Down - Síndrome de Down", 
-            "DI - Deficiência Intelectual", 
-            "TOD - Transtorno Opositor Desafiador", 
-            "TAG - Transtorno de Ansiedade Generalizada", 
-            "Deficiência Visual", 
-            "Deficiência Auditiva", 
-            "PC - Paralísia Cerebral", 
-            "Outros"
-        ]
+        cond_ops = ["TEA - Transtorno Espectro Autista", "TDAH - Transtorno de Deficit de Atenção, Hiperatividade", 
+                    "Down - Síndrome de Down", "DI - Deficiência Intelectual", "TOD - Transtorno Opositor Desafiador",
+                    "TAG - Transtorno de Ansiedade Generalizada", "Deficiência Visual", "Deficiência Auditiva",
+                    "PC - Paralísia Cerebral", "Outros"]
         conds = st.multiselect("1 - Sinalize todas as condições associadas", cond_ops, default=get_valid_defaults(d['condicoes'], cond_ops))
         
         nivel_ops = ["N/A", "1", "2", "3"]
@@ -522,7 +503,6 @@ elif menu == "🧠 3. Ficha de Acolhimento Completa":
         c1, c2 = st.columns(2)
         acomp_sn = c1.radio("3 - Faz algum tipo de acompanhamento?", opts_sn, index=idx(opts_sn, d['acomp_sn']), horizontal=True)
         acomp_qual = c1.text_input("Qual?", value=safe_str(d['acomp_qual']))
-        
         med_sn = c2.radio("4- Toma alguma medicação diariamente?", opts_sn, index=idx(opts_sn, d['med_sn']), horizontal=True)
         med_qual = c2.text_input("Qual é o medicamento?", value=safe_str(d['med_qual']))
         
@@ -530,31 +510,21 @@ elif menu == "🧠 3. Ficha de Acolhimento Completa":
         esc_qual = st.text_input("Qual nome da escola?", value=safe_str(d['esc_qual']))
 
         st.markdown("### II - COMUNICAÇÃO.")
-        com_ops = [
-            "Verbal - tem fala desenvolvida e compreensível",
-            "Não verbal - Ausência de fala, palavras soltas, fala sem função (ecolalias)",
-            "Usa gesto para apontar e solicitar o que deseja",
-            "Usa comunicação alternativa aumentativa CAA",
-            "Pistas Visuais o ajudam na compreensão.",
-            "Tem dificuldade de compreensão quando é solicitado algo?"
-        ]
-        comu = st.multiselect("1 - Como a criança se comunica? Assinale todas as alternativas que correspondem:", com_ops, default=get_valid_defaults(d['comunicacao'], com_ops))
+        com_ops = ["Verbal - tem fala desenvolvida e compreensível", "Não verbal - Ausência de fala, palavras soltas, fala sem função (ecolalias)",
+                   "Usa gesto para apontar e solicitar o que deseja", "Usa comunicação alternativa aumentativa CAA",
+                   "Pistas Visuais o ajudam na compreensão.", "Tem dificuldade de compreensão quando é solicitado algo?"]
+        comu = st.multiselect("1 - Como a criança se comunica?", com_ops, default=get_valid_defaults(d['comunicacao'], com_ops))
         comu_ajuda = st.text_input("2- Como podemos ajudá-lo em sua comunicação?", value=safe_str(d['comu_ajuda']))
 
         st.markdown("### III - QUESTÕES SENSORIAIS")
         sens_sn = st.radio("1 - Sua criança tem sensibilidades sensoriais?", opts_ns_ns, index=idx(opts_ns_ns, d['sens_sn']), horizontal=True)
-        sens_ops = [
-            "Luz - É sensível a muita claridade ou escuro?",
-            "Som - É muito sensível ao barulho, como sons altos ou som especifico?",
-            "Toque - É sensível e ou não gosta de toques como abraço?",
-            "Tato - Tem aversão com objetos pegajosos como massinha, mão suja?",
-            "Cheiro - Tem algum cheiro aversivo?",
-            "Equilíbrio - tem dificuldades com mudanças de superfície, altura, pular, escalar?"
-        ]
+        sens_ops = ["Luz - É sensível a muita claridade ou escuro?", "Som - É muito sensível ao barulho, como sons altos ou som especifico?",
+                    "Toque - É sensível e ou não gosta de toques como abraço?", "Tato - Tem aversão com objetos pegajosos como massinha, mão suja?",
+                    "Cheiro - Tem algum cheiro aversivo?", "Equilíbrio - tem dificuldades com mudanças de superfície, altura, pular, escalar?"]
         sens_quais = st.multiselect("2 - Quais são as mais relevantes?", sens_ops, default=get_valid_defaults(d['sens_quais'], sens_ops))
         sens_expl = st.text_input("4 - Explique melhor se necessário:", value=safe_str(d['sens_expl']))
         sens_est = st.text_area("5 - Como a criança reage a situações de estresse ou sobrecarga sensorial?", value=safe_str(d['sens_estresse']))
-        sens_adapt = st.text_area("6 - Quais adaptações ou suportes acredita que seriam úteis para facilitar a participação da criança em ambientes públicos?", value=safe_str(d['sens_adapt']))
+        sens_adapt = st.text_area("6 - Quais adaptações ou suportes seriam úteis?", value=safe_str(d['sens_adapt']))
         sens_pref = st.text_input("7 - A criança tem alguma preferência por algum ambiente?", value=safe_str(d['sens_pref']))
 
         st.markdown("### IV - ESTEREOTíPIAS.")
@@ -562,39 +532,37 @@ elif menu == "🧠 3. Ficha de Acolhimento Completa":
         est_obs = st.text_input("Se sim, quando elas acontecem? E como são?", value=safe_str(d['est_obs']))
 
         st.markdown("### V - INTERAÇÃO SOCIAL")
-        int_hab = st.text_area("1 - Quais são as principais habilidades e interesses da criança? Existe algum hiper foco?", value=safe_str(d['int_hab']))
-        int_brinq = st.text_area("2 - Prefere brincar com quais brinquedos e brincadeiras?", value=safe_str(d['int_brinq']))
+        int_hab = st.text_area("1 - Quais são as principais habilidades e interesses da criança?", value=safe_str(d['int_hab']))
+        int_brinq = st.text_area("2 - Prefere brincar com quais brinquedos?", value=safe_str(d['int_brinq']))
         int_criancas = st.radio("3 - A criança gosta de interagir com outras crianças?", opts_sn, index=idx(opts_sn, d['int_criancas']), horizontal=True)
-        int_suporte = st.text_input("Se sim, de que forma? Qual o suporte que precisa?", value=safe_str(d['int_suporte']))
+        int_suporte = st.text_input("Se sim, qual o suporte que precisa?", value=safe_str(d['int_suporte']))
 
         st.markdown("### VI - AUTONOMIA / INDEPENDÊNCIA")
-        st.write("1 - Sua criança tem autonomia completa nessas atividades:")
         ca, cb = st.columns(2)
         auto_banh = ca.radio("A) Banheiro", opts_sn, index=idx(opts_sn, d['auto_banh']), horizontal=True)
-        st.caption("* Importante: por questão de segurança, e para preservar a integridade das nossas crianças, nenhum voluntário esta autorizado dar suporte em banheiros. Caso seu filho precise é muito importante ser informado aqui e estar em alerta / disponível caso ele precise desse suporte.")
         auto_banh_obs = ca.text_input("Qual suporte necessário? (Banheiro)", value=safe_str(d['auto_banh_obs']))
         
         auto_alim = cb.radio("B) Alimentação", opts_sn, index=idx(opts_sn, d['auto_alim']), horizontal=True)
         auto_alim_obs = cb.text_input("Qual suporte necessário? (Alimentação)", value=safe_str(d['auto_alim_obs']))
         
-        aler_sn = st.radio("2 - A criança tem alguma alergia ou intolerância / restrição alimentar?", opts_sn, index=idx(opts_sn, d['aler_sn']), horizontal=True)
+        aler_sn = st.radio("2 - Alguma alergia ou intolerância / restrição alimentar?", opts_sn, index=idx(opts_sn, d['aler_sn']), horizontal=True)
         aler_obs = st.text_input("Se sim, descreva:", value=safe_str(d['aler_obs']))
 
         st.markdown("### VII - COMPORTAMENTOS DESAFIADORES")
-        comp_rotina = st.radio("1 - Sua criança se desorganiza com mudança de rotina e ambiente?", opts_sn, index=idx(opts_sn, d['comp_rotina']), horizontal=True)
-        comp_est = st.text_area("2 - A criança possui alguma rotina ou estratégia que a ajuda a lidar com mudanças ou transições?", value=safe_str(d['comp_estrategia']))
-        comp_amb = st.text_area("3 - Quais são as principais dificuldades ou desafios enfrentados pela criança em ambientes sociais?", value=safe_str(d['comp_ambientes']))
+        comp_rotina = st.radio("1 - Sua criança se desorganiza com mudança de rotina?", opts_sn, index=idx(opts_sn, d['comp_rotina']), horizontal=True)
+        comp_est = st.text_area("2 - A criança possui rotina para lidar com transições?", value=safe_str(d['comp_estrategia']))
+        comp_amb = st.text_area("3 - Principais desafios em ambientes sociais?", value=safe_str(d['comp_ambientes']))
         
-        gat_sn = st.radio("4 - O que geralmente o desorganiza? Existe algum gatilho específico que pode levar a comportamentos desafiadores na criança?", opts_sn, index=idx(opts_sn, d['comp_gat_sn']), horizontal=True)
-        gat_quais = st.text_input("Se sim, quais são eles?", value=safe_str(d['comp_gat_quais']), key="gatilhos_id")
+        gat_sn = st.radio("4 - Existe gatilho que pode levar a comportamentos desafiadores?", opts_sn, index=idx(opts_sn, d['comp_gat_sn']), horizontal=True)
+        gat_quais = st.text_input("Se sim, quais?", value=safe_str(d['comp_gat_quais']), key="gatilhos_id")
         
-        les_sn = st.radio("5 - A criança tem comportamentos autolesivos ou heterolesivos?", opts_sn, index=idx(opts_sn, d['comp_les_sn']), horizontal=True)
-        les_quais = st.text_input("Se sim, quais são eles?", value=safe_str(d['comp_les_quais']), key="lesoes_id")
+        les_sn = st.radio("5 - A criança tem comportamentos autolesivos?", opts_sn, index=idx(opts_sn, d['comp_les_sn']), horizontal=True)
+        les_quais = st.text_input("Se sim, quais?", value=safe_str(d['comp_les_quais']), key="lesoes_id")
         
-        comp_crise = st.text_area("Em caso de crises ou birra, o que o ajuda a se reorganizar?", value=safe_str(d['comp_crise']))
+        comp_crise = st.text_area("Em caso de crises, o que ajuda?", value=safe_str(d['comp_crise']))
         
         st.markdown("### VIII - Informações Adicionais")
-        info_adc = st.text_area("Existe alguma informação adicional relevante sobre a criança ou sugestão que você gostaria de compartilhar?", value=safe_str(d['info_adc']))
+        info_adc = st.text_area("Sugestão que você gostaria de compartilhar?", value=safe_str(d['info_adc']))
 
         if st.form_submit_button("Salvar Ficha Completa"):
             conn.execute('''UPDATE criancas SET 
@@ -611,7 +579,6 @@ elif menu == "🧠 3. Ficha de Acolhimento Completa":
                           auto_banh, auto_banh_obs, auto_alim, auto_alim_obs, aler_sn, aler_obs,
                           comp_rotina, comp_est, comp_amb, gat_sn, gat_quais, les_sn, les_quais, comp_crise, info_adc, id_crianca))
             conn.commit()
-            backup_db_to_drive() # BACKUP NUVEM
             st.success("Ficha Completa atualizada com sucesso! Atualizando tela...")
             time.sleep(1.5)
             st.rerun()
@@ -651,39 +618,34 @@ elif menu == "📋 4. Acompanhamento do Culto":
             c1, c2 = st.columns(2)
             periodo = c1.selectbox("CULTO:", ["Manhã", "Noite"])
             unidade = c2.selectbox("UNIDADE:", ["CENTRO", "UTM"])
-            coord = st.selectbox("COORDENADOR(A):", ["ANA LILA", "JULIA", "LETHICIA", "LILIAN", "SARAH", "SUEIDE"])
+            
+            coord_selecionado = st.selectbox("COORDENADOR(A):", ["ANA LILA", "JÚLIA", "LETHICIA", "LILIAN", "SARAH", "SUEIDE", "OUTROS"])
+            coord_outro = st.text_input("Se escolheu 'OUTROS' acima, digite o nome do(a) novo(a) Coordenador(a) aqui:")
+                
             voluntario = st.text_input("VOLUNTÁRIO(A):", value=st.session_state.usuario)
             relato = st.text_area("RELATÓRIO DETALHADO:")
             visitante = st.radio("VISITANTE?", ["NÃO", "SIM"], horizontal=True)
             
             if st.form_submit_button("💾 Salvar Acompanhamento"):
+                coord_final = coord_outro.strip().upper() if coord_selecionado == "OUTROS" and coord_outro.strip() else coord_selecionado
+
                 conn.execute('''INSERT INTO acompanhamentos (crianca_id, data, periodo, unidade, coordenador, voluntario, relato, visitante) 
-                                VALUES (?,?,?,?,?,?,?,?)''', (id_crianca, data_digitada, periodo, unidade, coord, voluntario, relato, visitante))
+                                VALUES (?,?,?,?,?,?,?,?)''', (id_crianca, data_digitada, periodo, unidade, coord_final, voluntario, relato, visitante))
                 conn.commit()
-                backup_db_to_drive() # BACKUP NUVEM
-                st.success("Relatório salvo com sucesso!")
-                time.sleep(1.5)
-                st.rerun()
+                st.success("Relatório de culto salvo com sucesso no banco de dados!")
+        
+        coord_atual_display = coord_outro.strip().upper() if coord_selecionado == "OUTROS" and coord_outro.strip() else coord_selecionado
         
         dados_pdf_culto = {
-            "nome": nome_crianca_puro,
-            "data": data_digitada,
-            "periodo": periodo,
-            "unidade": unidade,
-            "coordenador": coord,
-            "voluntario": voluntario,
-            "relato": relato,
-            "visitante": visitante
+            "nome": nome_crianca_puro, "data": data_digitada, "periodo": periodo, "unidade": unidade,
+            "coordenador": coord_atual_display, "voluntario": voluntario, "relato": relato, "visitante": visitante
         }
         
         st.write("---")
-        st.write("Para imprimir esta ficha de culto preenchida na íntegra, clique abaixo:")
+        st.write("Para imprimir esta ficha de culto, clique abaixo:")
         pdf_path_culto = gerar_pdf_culto(dados_pdf_culto)
         with open(pdf_path_culto, "rb") as pdf_file:
-            st.download_button(label="🖨️ Baixar Ficha do Culto em PDF", 
-                               data=pdf_file, 
-                               file_name=f"ficha_culto_{nome_crianca_puro}.pdf", 
-                               mime="application/pdf")
+            st.download_button(label="🖨️ Baixar Ficha do Culto em PDF", data=pdf_file, file_name=f"ficha_culto_{nome_crianca_puro}.pdf", mime="application/pdf")
             
     conn.close()
 
@@ -691,83 +653,113 @@ elif menu == "📋 4. Acompanhamento do Culto":
 # ABA 5: BUSCAR E IMPRIMIR
 # ==========================================
 elif menu == "🖨️ 5. Buscar & Imprimir":
-    st.header("🖨️ Central de Consultas")
-    c1, c2 = st.columns(2)
-    b_nome = c1.text_input("Nome da criança")
-    b_data = c2.text_input("Data de Nascimento (Ex: 10/05/2018)")
+    st.header("🖨️ Central de Consultas e Relatórios")
     
-    if st.button("Pesquisar"):
-        conn = get_db()
-        query = "SELECT * FROM criancas WHERE 1=1"
-        params = []
-        if b_nome: query += " AND nome LIKE ?"; params.append(f"%{b_nome}%")
-        if b_data: query += " AND nascimento = ?"; params.append(b_data)
-        res = conn.execute(query, params).fetchall()
+    tab_busca_ind, tab_relatorio_geral = st.tabs(["🔍 Busca Individual", "📊 Relatório Geral"])
+    
+    with tab_busca_ind:
+        c1, c2 = st.columns(2)
+        b_nome = c1.text_input("Nome da criança")
+        b_data = c2.text_input("Data de Nascimento (Ex: 10/05/2018)")
         
-        if res:
-            for r in res:
-                with st.expander(f"👤 {safe_str(r['nome'])} (Nasc: {safe_str(r['nascimento'])})", expanded=True):
-                    tab_dados, tab_rap, tab_ana, tab_hist, tab_docs = st.tabs(["📋 Dados", "⚡ Ficha Rápida", "🧠 Ficha Completa", "📜 Histórico de Cultos", "🖨️ Imprimir Fichas"])
-                    
-                    with tab_dados:
-                        c_img, c_inf = st.columns([1, 2])
-                        if r['foto'] and os.path.exists(r['foto']): c_img.image(r['foto'], width=200)
-                        c_inf.write(f"**Responsável:** {safe_str(r['responsavel'])} | **Cel:** {safe_str(r['tel_responsavel'])}")
-                        c_inf.write(f"**Mãe:** {safe_str(r['mae'])} | **Pai:** {safe_str(r['pai'])}")
-                        c_inf.write(f"**Endereço:** {safe_str(r['endereco'])}")
+        if st.button("Pesquisar"):
+            conn = get_db()
+            query = "SELECT * FROM criancas WHERE 1=1"
+            params = []
+            if b_nome: query += " AND nome LIKE ?"; params.append(f"%{b_nome}%")
+            if b_data: query += " AND nascimento = ?"; params.append(b_data)
+            res = conn.execute(query, params).fetchall()
+            
+            if res:
+                for r in res:
+                    with st.expander(f"👤 {safe_str(r['nome'])} (Nasc: {safe_str(r['nascimento'])})", expanded=True):
+                        tab_dados, tab_rap, tab_ana, tab_hist, tab_docs = st.tabs(["📋 Dados", "⚡ Ficha Rápida", "🧠 Ficha Completa", "📜 Histórico", "🖨️ Imprimir"])
                         
-                    with tab_rap:
-                        st.write(f"**Diagnóstico:** {safe_str(r['rapida_diag'])}")
-                        st.write(f"**Socializa?** {safe_str(r['rapida_soc'])} - {safe_str(r['rapida_soc_obs'])}")
-                        st.write(f"**Comunica?** {safe_str(r['rapida_com'])} - {safe_str(r['rapida_com_obs'])}")
-                        st.write(f"**Restrição alimentar?** {safe_str(r['rapida_rest_sn'])} - {safe_str(r['rapida_rest_qual'])}")
-                        st.write(f"**Alergia?** {safe_str(r['rapida_aler_sn'])} - {safe_str(r['rapida_aler_qual'])}")
-                        st.write(f"**Atividades que gosta:** {safe_str(r['rapida_ativ'])}")
-                        st.write(f"**Fica agitada com:** {safe_str(r['rapida_agita'])}")
-                        st.write(f"**Acalma com:** {safe_str(r['rapida_acalma'])}")
-                        st.write(f"**Infos Extras:** {safe_str(r['rapida_adc'])}")
-                        
-                    with tab_ana:
-                        st.write(f"**Condições:** {safe_str(r['condicoes'])}")
-                        st.write(f"**Comunicação:** {safe_str(r['comunicacao'])}")
-                        st.write(f"**Sensorial:** {safe_str(r['sens_quais'])}")
-                        st.write(f"**Gatilhos:** {safe_str(r['comp_gat_quais'])}")
-                        st.write(f"**Informações Extras:** {safe_str(r['info_adc'])}")
-
-                    with tab_hist:
-                        historico = conn.execute("SELECT * FROM acompanhamentos WHERE crianca_id = ? ORDER BY id DESC", (r['id'],)).fetchall()
-                        if historico:
-                            for h in historico: st.info(f"📅 {h['data']} ({h['periodo']}) | Coord: {h['coordenador']} | Voluntário: {h['voluntario']}\n\n**Relato:** {h['relato']}")
-                        else:
-                            st.write("Sem registros de acompanhamento.")
+                        with tab_dados:
+                            c_img, c_inf = st.columns([1,2])
                             
-                    with tab_docs:
-                        st.write("Selecione o documento que deseja gerar:")
-                        
-                        pdf_path_hist = gerar_historico_pdf(r['nome'], historico)
-                        with open(pdf_path_hist, "rb") as pdf_file:
-                            st.download_button(label="🖨️ Baixar Histórico Completo de Cultos (PDF)", 
-                                               data=pdf_file, 
-                                               file_name=f"historico_cultos_{r['nome']}.pdf", 
-                                               mime="application/pdf",
-                                               key=f"dl_hist_{r['id']}")
-                                               
-                        pdf_path_ficha = gerar_ficha_pdf(r)
-                        with open(pdf_path_ficha, "rb") as f:
-                            st.download_button(label="🖨️ Baixar Ficha da Criança (PDF)", 
-                                               data=f, 
-                                               file_name=f"ficha_resumo_{r['nome']}.pdf",
-                                               key=f"dl_ficha_{r['id']}")
-        else: st.error("Criança não encontrada.")
-        conn.close()
+                            # --- LEITURA INTELIGENTE PARA MOSTRAR A FOTO NA BUSCA ---
+                            if r['foto']:
+                                if str(r['foto']).startswith('http'):
+                                    c_img.image(r['foto'], width=200, caption="Foto na Nuvem")
+                                elif os.path.exists(r['foto']):
+                                    c_img.image(r['foto'], width=200, caption="Foto Local")
+                                    
+                            c_inf.write(f"**Responsável:** {safe_str(r['responsavel'])} | **Cel:** {safe_str(r['tel_responsavel'])}")
+                            c_inf.write(f"**Mãe:** {safe_str(r['mae'])} | **Pai:** {safe_str(r['pai'])}")
+                            c_inf.write(f"**Endereço:** {safe_str(r['endereco'])}")
+                            
+                        with tab_rap:
+                            st.write(f"**Diagnóstico:** {safe_str(r['rapida_diag'])}")
+                            st.write(f"**Socializa?** {safe_str(r['rapida_soc'])} - {safe_str(r['rapida_soc_obs'])}")
+                            
+                        with tab_ana:
+                            st.write(f"**Condições:** {safe_str(r['condicoes'])}")
+                            st.write(f"**Comunicação:** {safe_str(r['comunicacao'])}")
+
+                        with tab_hist:
+                            historico = conn.execute("SELECT * FROM acompanhamentos WHERE crianca_id = ? ORDER BY id DESC", (r['id'],)).fetchall()
+                            if historico:
+                                for h in historico: st.info(f"📅 {h['data']} ({h['periodo']}) | Coord: {h['coordenador']} | Vol: {h['voluntario']}\n\n**Relato:** {h['relato']}")
+                            else:
+                                st.write("Sem registros de acompanhamento.")
+                                
+                        with tab_docs:
+                            st.write("Selecione o documento:")
+                            pdf_path_hist = gerar_historico_pdf(r['nome'], historico)
+                            with open(pdf_path_hist, "rb") as pdf_file:
+                                st.download_button(label="🖨️ Baixar Histórico de Cultos (PDF)", data=pdf_file, file_name=f"historico_{r['nome']}.pdf", mime="application/pdf", key=f"dl_hist_{r['id']}")
+                            
+                            pdf_path_ficha = gerar_ficha_pdf(r)
+                            with open(pdf_path_ficha, "rb") as f:
+                                st.download_button(label="🖨️ Baixar Ficha (PDF)", data=f, file_name=f"ficha_{r['nome']}.pdf", key=f"dl_ficha_{r['id']}")
+            else:
+                st.error("Criança não encontrada.")
+            conn.close()
+
+    with tab_relatorio_geral:
+        st.subheader("Filtros para o Relatório")
+        f_col1, f_col2, f_col3 = st.columns(3)
+        r_data = f_col1.text_input("Filtrar por Data", placeholder="Ex: 10/05/2026")
+        r_turno = f_col2.selectbox("Filtrar por Turno", ["Todos", "Manhã", "Noite"])
+        r_unidade = f_col3.selectbox("Filtrar por Unidade", ["Todas", "CENTRO", "UTM"])
+        
+        if st.button("Gerar Relatório de Cultos", type="primary"):
+            conn = get_db()
+            query_rel = "SELECT a.data, a.periodo, a.unidade, a.coordenador, a.voluntario, a.relato, c.nome FROM acompanhamentos a JOIN criancas c ON a.crianca_id = c.id WHERE 1=1"
+            params_rel = []
+            
+            if r_data:
+                query_rel += " AND a.data = ?"
+                params_rel.append(r_data)
+            if r_turno != "Todos":
+                query_rel += " AND a.periodo = ?"
+                params_rel.append(r_turno)
+            if r_unidade != "Todas":
+                query_rel += " AND a.unidade = ?"
+                params_rel.append(r_unidade)
+                
+            query_rel += " ORDER BY a.id DESC"
+            res_rel = conn.execute(query_rel, params_rel).fetchall()
+            
+            if res_rel:
+                st.success(f"Encontrado(s) {len(res_rel)} registro(s).")
+                pdf_rel_geral = gerar_pdf_relatorio_geral(res_rel, r_data, r_turno, r_unidade)
+                with open(pdf_rel_geral, "rb") as pdf_file:
+                    st.download_button(label="🖨️ Baixar Relatório Geral (PDF)", data=pdf_file, file_name=f"rel_geral_{int(time.time())}.pdf", mime="application/pdf")
+                
+                st.write("---")
+                for r in res_rel:
+                    st.info(f"**Criança:** {safe_str(r['nome'])}\n\n**Data:** {r['data']} | **Turno:** {r['periodo']} | **Unidade:** {r['unidade']}\n\n**Coord:** {r['coordenador']} | **Voluntário:** {r['voluntario']}\n\n**Relato:** {r['relato']}")
+            else:
+                st.warning("Nenhum culto encontrado.")
+            conn.close()
 
 # ==========================================
 # ABA 6: GESTÃO DE EQUIPE
 # ==========================================
 elif menu == "👥 6. Gestão de Equipe":
     st.header("👥 Cadastro de Supervisores")
-    st.write("Adicione novos voluntários/supervisores para acessarem o sistema.")
-    
     with st.form("form_user"):
         nome_sup = st.text_input("Nome Completo do Supervisor")
         user_sup = st.text_input("Login de Acesso (Ex: joao.silva)")
@@ -779,12 +771,9 @@ elif menu == "👥 6. Gestão de Equipe":
                     conn = get_db()
                     conn.execute("INSERT INTO supervisores (nome, usuario, senha) VALUES (?,?,?)", (nome_sup, user_sup, senha_sup))
                     conn.commit()
-                    backup_db_to_drive() # BACKUP NUVEM
-                    st.success(f"Supervisor '{nome_sup}' cadastrado com sucesso!")
-                    time.sleep(1.5)
-                    st.rerun()
+                    st.success(f"Supervisor '{nome_sup}' cadastrado!")
                 except sqlite3.IntegrityError:
-                    st.error("Erro: Esse 'Login de Acesso' já está sendo usado por outra pessoa.")
+                    st.error("Erro: Esse 'Login' já está sendo usado.")
                 finally:
                     conn.close()
             else:
