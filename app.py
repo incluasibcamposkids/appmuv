@@ -20,7 +20,7 @@ st.set_page_config(page_title="MOV INCLUA", layout="wide", initial_sidebar_state
 # --- CHAVE DA API IMGBB ---
 IMGBB_API_KEY = "6c3c7d7468bd08f226d25d7ccf956560"
 
-# --- ADAPTADOR MÁGICO PARA O BANCO EM NUVEM (SUPABASE) ---
+# --- ADAPTADOR MÁGICO VIP (SUPABASE - PGBOUNCER) ---
 class DBWrapper:
     def __init__(self):
         self.conn = psycopg2.connect(
@@ -30,17 +30,18 @@ class DBWrapper:
             user="postgres.mgqcbdlvvfxairxkuqdt",
             password="Muvinclua2026"
         )
+        # 🚀 O CRACHÁ VIP: Permite leitura instantânea e sem filas no servidor!
+        self.conn.autocommit = True
     
     def execute(self, query, params=None):
-        # Transforma os dicionários do Postgres em um formato fácil de ler
         cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-        # Traduz a linguagem antiga do SQLite (?) para a linguagem nova do Postgres (%s)
         query_traduzida = query.replace('?', '%s')
         cursor.execute(query_traduzida, params)
         return cursor
 
     def commit(self):
-        self.conn.commit()
+        # Com o autocommit, o salvamento é automático e direto.
+        pass
 
     def close(self):
         self.conn.close()
@@ -270,7 +271,6 @@ def init_db():
     if not admin:
         conn.execute("INSERT INTO supervisores (nome, usuario, senha) VALUES (?,?,?)", ("Administrador","admin","Inclua2026"))
     
-    conn.commit()
     conn.close()
 
 init_db()
@@ -306,7 +306,6 @@ if not st.session_state.autenticado:
             if user:
                 agora = datetime.now().strftime("%d/%m/%Y %H:%M")
                 conn.execute("INSERT INTO acessos (supervisor, data_hora) VALUES (?,?)", (user['nome'], agora))
-                conn.commit()
                 st.session_state.autenticado = True
                 st.session_state.usuario = user['nome']
                 st.rerun()
@@ -369,7 +368,6 @@ if menu == "📝 1. Cadastro Pessoal":
                     if st.button("🗑️ Apagar Cadastro Definitivamente"):
                         conn.execute("DELETE FROM acompanhamentos WHERE crianca_id=?", (v_id,))
                         conn.execute("DELETE FROM criancas WHERE id=?", (v_id,))
-                        conn.commit()
                         st.success("Cadastro apagado com sucesso! Atualizando tela...")
                         time.sleep(1.5)
                         st.rerun()
@@ -434,7 +432,6 @@ if menu == "📝 1. Cadastro Pessoal":
                                      (nome, nasc, endereco, responsavel, tel_responsavel, mae, tel_mae, pai, tel_pai, f_path, v_id))
                         st.success("Cadastro atualizado!")
                     
-                    conn.commit()
                     conn.close()
                     time.sleep(1.5)
                     st.rerun()
@@ -483,7 +480,6 @@ elif menu == "⚡ 2. Ficha de Acolhimento Rápido":
                             rapida_rest_sn=?, rapida_rest_qual=?, rapida_aler_sn=?, rapida_aler_qual=?,
                             rapida_ativ=?, rapida_agita=?, rapida_acalma=?, rapida_adc=? WHERE id=?''',
                          (diag, soc, soc_obs, com, com_obs, rest, rest_qual, aler, aler_qual, ativ, agita, acalma, adc, id_crianca))
-            conn.commit()
             st.success("Ficha Rápida atualizada! Atualizando página...")
             time.sleep(1.5)
             st.rerun()
@@ -597,7 +593,6 @@ elif menu == "🧠 3. Ficha de Acolhimento Completa":
                           est_sn, est_obs, int_hab, int_brinq, int_criancas, int_suporte,
                           auto_banh, auto_banh_obs, auto_alim, auto_alim_obs, aler_sn, aler_obs,
                           comp_rotina, comp_est, comp_amb, gat_sn, gat_quais, les_sn, les_quais, comp_crise, info_adc, id_crianca))
-            conn.commit()
             st.success("Ficha Completa atualizada com sucesso! Atualizando tela...")
             time.sleep(1.5)
             st.rerun()
@@ -650,7 +645,6 @@ elif menu == "📋 4. Acompanhamento do Culto":
 
                 conn.execute('''INSERT INTO acompanhamentos (crianca_id, data, periodo, unidade, coordenador, voluntario, relato, visitante) 
                                 VALUES (?,?,?,?,?,?,?,?)''', (id_crianca, data_digitada, periodo, unidade, coord_final, voluntario, relato, visitante))
-                conn.commit()
                 st.success("Relatório de culto salvo com sucesso no banco de dados!")
         
         coord_atual_display = coord_outro.strip().upper() if coord_selecionado == "OUTROS" and coord_outro.strip() else coord_selecionado
@@ -787,7 +781,6 @@ elif menu == "👥 6. Gestão de Equipe":
                 try:
                     conn = get_db()
                     conn.execute("INSERT INTO supervisores (nome, usuario, senha) VALUES (?,?,?)", (nome_sup, user_sup, senha_sup))
-                    conn.commit()
                     st.success(f"Supervisor '{nome_sup}' cadastrado!")
                 except psycopg2.IntegrityError:
                     st.error("Erro: Esse 'Login' já está sendo usado.")
