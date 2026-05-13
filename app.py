@@ -1,5 +1,6 @@
 import streamlit as st
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 import time
 import ast
@@ -18,6 +19,34 @@ st.set_page_config(page_title="MOV INCLUA", layout="wide", initial_sidebar_state
 
 # --- CHAVE DA API IMGBB ---
 IMGBB_API_KEY = "6c3c7d7468bd08f226d25d7ccf956560"
+
+# --- ADAPTADOR MÁGICO PARA O BANCO EM NUVEM (SUPABASE) ---
+class DBWrapper:
+    def __init__(self):
+        self.conn = psycopg2.connect(
+            host="aws-1-sa-east-1.pooler.supabase.com",
+            port="6543",
+            dbname="postgres",
+            user="postgres.mgqcbdlvvfxairxkuqdt",
+            password="Muvinclua2026"
+        )
+    
+    def execute(self, query, params=None):
+        # Transforma os dicionários do Postgres em um formato fácil de ler
+        cursor = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        # Traduz a linguagem antiga do SQLite (?) para a linguagem nova do Postgres (%s)
+        query_traduzida = query.replace('?', '%s')
+        cursor.execute(query_traduzida, params)
+        return cursor
+
+    def commit(self):
+        self.conn.commit()
+
+    def close(self):
+        self.conn.close()
+
+def get_db():
+    return DBWrapper()
 
 # --- ESTILO CLEAN ---
 st.markdown("""
@@ -39,11 +68,6 @@ st.markdown("""
 ARQUIVO_LOGO = "inclusao preto.jpeg"
 
 # --- FUNÇÕES DE APOIO ---
-def get_db():
-    conn = sqlite3.connect('mov_inclua_v4.db')
-    conn.row_factory = sqlite3.Row
-    return conn
-
 def safe_str(valor):
     return valor if valor is not None else ""
 
@@ -80,7 +104,6 @@ def upload_foto_imgbb(foto_bytes):
     }
     response = requests.post(url, data=payload)
     if response.status_code == 200:
-        # Retorna a URL direta da imagem salva na nuvem
         return response.json()['data']['url']
     else:
         raise Exception(f"Erro ao conectar com ImgBB: {response.text}")
@@ -212,11 +235,11 @@ def gerar_pdf_relatorio_geral(registros, data_filtro, turno_filtro, unidade_filt
     pdf.output(caminho_pdf)
     return caminho_pdf
 
-# --- INICIALIZAÇÃO DO BANCO DE DADOS ---
+# --- INICIALIZAÇÃO DO BANCO DE DADOS (AGORA NO POSTGRES) ---
 def init_db():
     conn = get_db()
     conn.execute('''CREATE TABLE IF NOT EXISTS criancas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         nome TEXT, nascimento TEXT, endereco TEXT, responsavel TEXT, tel_responsavel TEXT,
         mae TEXT, tel_mae TEXT, pai TEXT, tel_pai TEXT, foto TEXT, arquivo_laudo TEXT,
         rapida_diag TEXT, rapida_soc TEXT, rapida_soc_obs TEXT, rapida_com TEXT, rapida_com_obs TEXT,
@@ -233,16 +256,15 @@ def init_db():
         info_adc TEXT)''')
     
     conn.execute('''CREATE TABLE IF NOT EXISTS acompanhamentos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         crianca_id INTEGER, data TEXT, periodo TEXT, unidade TEXT, 
-        coordenador TEXT, voluntario TEXT, relato TEXT, visitante TEXT,
-        FOREIGN KEY(crianca_id) REFERENCES criancas(id))''')
+        coordenador TEXT, voluntario TEXT, relato TEXT, visitante TEXT)''')
     
     conn.execute('''CREATE TABLE IF NOT EXISTS supervisores (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, nome TEXT, usuario TEXT UNIQUE, senha TEXT)''')
+        id SERIAL PRIMARY KEY, nome TEXT, usuario TEXT UNIQUE, senha TEXT)''')
     
     conn.execute('''CREATE TABLE IF NOT EXISTS acessos (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, supervisor TEXT, data_hora TEXT)''')
+        id SERIAL PRIMARY KEY, supervisor TEXT, data_hora TEXT)''')
     
     admin = conn.execute("SELECT * FROM supervisores WHERE usuario='admin'").fetchone()
     if not admin:
@@ -362,7 +384,6 @@ if menu == "📝 1. Cadastro Pessoal":
             nasc = c2.text_input("Data de Nascimento (Ex: 10/05/2018)", value=v_nasc, max_chars=10)
             endereco = st.text_input("Endereço Completo", value=v_end)
             
-            # --- LEITURA INTELIGENTE DA FOTO (LINK DO IMGBB OU ARQUIVO LOCAL) ---
             if v_foto_antiga:
                 if str(v_foto_antiga).startswith('http'):
                     st.image(v_foto_antiga, width=150, caption="Foto na Nuvem")
@@ -394,8 +415,6 @@ if menu == "📝 1. Cadastro Pessoal":
                     st.error("O nome é obrigatório.")
                 else:
                     f_path = v_foto_antiga
-                    
-                    # --- EXECUTA O UPLOAD PARA O IMGBB SE HOUVER FOTO ---
                     if foto:
                         st.info("🔄 Enviando a foto para a nuvem. Por favor, aguarde...")
                         try:
@@ -603,9 +622,9 @@ elif menu == "📋 4. Acompanhamento do Culto":
         mes_str = data_digitada[3:] if len(data_digitada) == 10 else "/0000"
         ano_str = data_digitada[6:] if len(data_digitada) == 10 else "0000"
         
-        f_dia = conn.execute("SELECT COUNT(*) FROM acompanhamentos WHERE crianca_id=? AND data=?", (id_crianca, data_digitada)).fetchone()[0]
-        f_mes = conn.execute("SELECT COUNT(*) FROM acompanhamentos WHERE crianca_id=? AND data LIKE ?", (id_crianca, f"%{mes_str}%")).fetchone()[0]
-        f_ano = conn.execute("SELECT COUNT(*) FROM acompanhamentos WHERE crianca_id=? AND data LIKE ?", (id_crianca, f"%{ano_str}%")).fetchone()[0]
+        f_dia = conn.execute("SELECT COUNT(*) FROM acompanhamentos WHERE crianca_id=? AND data=?", (id_crianca, data_digitada)).fetchone()['count']
+        f_mes = conn.execute("SELECT COUNT(*) FROM acompanhamentos WHERE crianca_id=? AND data LIKE ?", (id_crianca, f"%{mes_str}%")).fetchone()['count']
+        f_ano = conn.execute("SELECT COUNT(*) FROM acompanhamentos WHERE crianca_id=? AND data LIKE ?", (id_crianca, f"%{ano_str}%")).fetchone()['count']
         
         st.subheader("📈 Controle de Frequência")
         c_dia, c_mes, c_ano = st.columns(3)
@@ -677,8 +696,6 @@ elif menu == "🖨️ 5. Buscar & Imprimir":
                         
                         with tab_dados:
                             c_img, c_inf = st.columns([1,2])
-                            
-                            # --- LEITURA INTELIGENTE PARA MOSTRAR A FOTO NA BUSCA ---
                             if r['foto']:
                                 if str(r['foto']).startswith('http'):
                                     c_img.image(r['foto'], width=200, caption="Foto na Nuvem")
@@ -772,7 +789,7 @@ elif menu == "👥 6. Gestão de Equipe":
                     conn.execute("INSERT INTO supervisores (nome, usuario, senha) VALUES (?,?,?)", (nome_sup, user_sup, senha_sup))
                     conn.commit()
                     st.success(f"Supervisor '{nome_sup}' cadastrado!")
-                except sqlite3.IntegrityError:
+                except psycopg2.IntegrityError:
                     st.error("Erro: Esse 'Login' já está sendo usado.")
                 finally:
                     conn.close()
